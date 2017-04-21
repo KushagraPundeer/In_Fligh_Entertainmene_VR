@@ -1,0 +1,107 @@
+#!/bin/bash
+
+UDEV=lib/x86_64-linux-gnu/libudev.so
+
+# Check to see if ldconfig is available to find libraries
+has_ldconfig() {
+	which ldconfig > /dev/null && ldconfig -p > /dev/null
+	return $?
+}
+
+# Check to see if udev is in one of the common locations where the linker can find it
+check_udev() {
+	if has_ldconfig
+	then
+		ldconfig -p | grep libudev.so.0 > /dev/null
+	else
+		test -e "/$UDEV.0" -o -e "/usr/$UDEV.0"
+	fi
+	return $?
+}
+
+# Function to check for system-installed libraries
+check_library() {
+	LIB_NAME="$1";
+	ldconfig -p | grep "${LIB_NAME}" > /dev/null;
+	return $?;
+}
+
+# Function to test for appropriate library architecture
+test_architecture() {
+	LIB_PATH="$1";
+	ARCH="$2";
+	file -L "${LIB_PATH}" | sed -e 's|Intel 80386|i386|g' -e 's|x86-64|x86_64|g' | grep "${ARCH}";
+}
+
+# Function to ldconfig find a library compatible with the underlying system architecture
+find_compatible_library() {
+	LIB_NAME="$1";
+	ARCH="$2";
+	CANDIDATES=$(ldconfig -p | grep "${LIB_NAME}");
+	IFS='
+';
+	for CANDIDATE in ${CANDIDATES}; do
+		LIB_PATH=$(echo "${CANDIDATE}" | sed -e 's|.*=>\s*||g' | head -n 1);
+		ARCH_MATCHES=$(file -L "${LIB_PATH}" | sed -e 's|Intel 80386|i386|g' -e 's|x86-64|x86_64|g' | grep "${ARCH}");
+		if [ "${ARCH_MATCHES}" != "" ]; then
+			echo "${LIB_PATH}";
+			return;
+		fi
+	done
+}
+
+# Function to search the most common library paths for a library compatible with the underlying system architecture
+search_common_library_paths() {
+	LIB_NAME="$1";
+	ARCH="$2";
+	COMMON_PATHS="/lib /usr/lib /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu";
+	for TEST_PATH in ${COMMON_PATHS}; do
+		LIB_PATH=$(ls ${TEST_PATH}/${LIB_NAME}* 2>/dev/null | head -n 1);
+		if [ "${LIB_PATH}" = "" ]; then
+			continue;
+		fi
+		ARCH_MATCHES=$(test_architecture "${LIB_PATH}" "${ARCH}");
+		if [ "${ARCH_MATCHES}" != "" ]; then
+			echo "${LIB_PATH}";
+			return;
+		fi
+	done
+}
+
+# Find libudev, however it may be accessible
+find_udev() {
+	if has_ldconfig
+	then
+		UDEV_SO=$(find_compatible_library "libudev.so" "x86_64");
+	else
+		UDEV_SO=$(search_common_library_paths "libudev.so" "x86_64");
+	fi
+	echo "$UDEV_SO"
+}
+
+# The host directory is the location where this application is run from
+HOST_DIR=`dirname "$0"`
+# Make sure the host directory is set as an override in the library search path
+if [ -n "$LD_LIBRARY_PATH" ]
+then
+	export LD_LIBRARY_PATH="$HOST_DIR":$LD_LIBRARY_PATH
+else
+	export LD_LIBRARY_PATH="$HOST_DIR"
+fi
+
+# Make sure libudev is findable by the runtime linker
+if ! ( [ -e "$HOST_DIR/libudev.so.0" ] || check_udev )
+then
+	# If it's not available then go looking for it and link it to where it can be found (the host directory)
+	UDEV_SO=`find_udev`
+	if [ -e "$UDEV_SO" ]
+	then
+		ln -s "$UDEV_SO" "$HOST_DIR/libudev.so.0"
+	else
+		echo "Could not find libudev."
+	fi
+fi
+
+# Make sure the CoherentUI binary is executable and run it
+chmod u+x "$HOST_DIR/CoherentUI_Host.bin"
+exec -a "$0" "$HOST_DIR/CoherentUI_Host.bin" "$@"
